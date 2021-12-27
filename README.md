@@ -1,5 +1,5 @@
 # njfdCRH1A.github.io
-Personal website
+个人网站（也许是吧……）
 
 应该会作为BVE追加的发布页面
 
