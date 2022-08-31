@@ -1,7 +1,7 @@
 # njfdCRH1A.github.io
 个人网站（也许是吧……）
 
-[点击进入](njfdCRH1A.github.io)
+[点击进入](https://njfdcrh1a.github.io/)
 
 应该会作为BVE追加的发布页面
 
