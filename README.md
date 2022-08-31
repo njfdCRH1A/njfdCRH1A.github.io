@@ -1,6 +1,8 @@
 # njfdCRH1A.github.io
 个人网站（也许是吧……）
 
+[点击进入](njfdCRH1A.github.io)
+
 应该会作为BVE追加的发布页面
 
 也有可能上传一些奇奇怪怪的铁路相关
