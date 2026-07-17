@@ -154,22 +154,51 @@ let saveTimer = null;
  * saveState - 将当前状态序列化到 localStorage
  *
  * 保存 line、stations、stationCounter、timeState、pidsBackground。
- * 图片 data URL 可能较大，捕获 quota 异常。
+ * 注意：pidsBackground.image（背景纹理 data URL）不保存——
+ * data URL 动辄数 MB，会轻易超出 localStorage 5-10MB 配额，
+ * 导致线上环境（https://）保存静默失败。
+ * 图片设置（type/color/imageSize/imageOpacity）仍保留，
+ * 下次打开时用户重新上传图片即可。
+ *
+ * 依赖: saveReady, STORAGE_KEY, pidsBackground, CONFIG
  */
 function saveState() {
     if (!saveReady) return;
+
+    // 剥离背景图片的 data URL（体积过大，不持久化）
+    const bgForSave = { ...pidsBackground };
+    delete bgForSave.image;
+
     const state = {
         line: { ...line },
         stations: stations.slice(),
         stationCounter,
         timeState: { ...timeState },
-        pidsBackground: { ...pidsBackground },
+        pidsBackground: bgForSave,
         currentStationIndex
     };
+
+    const payload = JSON.stringify(state);
     try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        localStorage.setItem(STORAGE_KEY, payload);
     } catch (e) {
-        // localStorage 满或不可用，静默失败
+        console.warn('[PIDS] localStorage 保存失败 (' + (e.name || 'Error') + '):', e.message);
+
+        // 配额超限时尝试压缩：移除旧数据中的 image 残留后重试
+        if (e.name === 'QuotaExceededError') {
+            const existing = localStorage.getItem(STORAGE_KEY);
+            if (existing) {
+                try {
+                    const old = JSON.parse(existing);
+                    if (old.pidsBackground && old.pidsBackground.image) {
+                        delete old.pidsBackground.image;
+                        localStorage.setItem(STORAGE_KEY, JSON.stringify(old));
+                        // 空间释放后重新尝试本次写入
+                        try { localStorage.setItem(STORAGE_KEY, payload); } catch (_) {}
+                    }
+                } catch (_) {}
+            }
+        }
     }
 }
 
@@ -183,6 +212,10 @@ function scheduleSave() {
 
 /**
  * loadState - 从 localStorage 恢复状态
+ *
+ * 恢复后自动剥离 pidsBackground.image 字段——
+ * 背景纹理图的 data URL 不持久化，避免撑爆 localStorage 配额。
+ * 旧版数据中可能残留的 image 也会在此清除。
  *
  * @returns {boolean} 是否成功恢复
  */
@@ -215,10 +248,19 @@ function loadState() {
             });
         });
         if (state.timeState) Object.assign(timeState, state.timeState);
-        if (state.pidsBackground) Object.assign(pidsBackground, state.pidsBackground);
+        if (state.pidsBackground) {
+            Object.assign(pidsBackground, state.pidsBackground);
+            // 剥离旧版数据中可能残留的 image data URL（体积过大，不恢复）
+            pidsBackground.image = null;
+            // 之前保存为 image 模式但 image 已被清除时，回退为纯色模式
+            if (pidsBackground.type === 'image') {
+                pidsBackground.type = 'color';
+            }
+        }
         if (state.currentStationIndex !== undefined) currentStationIndex = state.currentStationIndex;
         return true;
     } catch (e) {
+        console.warn('[PIDS] localStorage 读取失败，将使用默认配置:', e.message);
         return false;
     }
 }
@@ -2172,6 +2214,22 @@ btnAutoRun.addEventListener('click', startAutoRun);
 btnPause.addEventListener('click', pauseAutoRun);
 
 // ========== 初始化 ==========
+
+// 0. 清理旧版缓存中可能残留的 image data URL（体积过大导致线上保存失败）
+//    在恢复状态前执行，确保后续保存不会再包含 image 字段
+(function cleanupStaleImageData() {
+    try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return;
+        const old = JSON.parse(raw);
+        if (old.pidsBackground && old.pidsBackground.image) {
+            // 旧数据含 image data URL → 删除后写回，释放配额空间
+            delete old.pidsBackground.image;
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(old));
+            console.log('[PIDS] 已清理缓存中的背景图片数据，释放存储空间');
+        }
+    } catch (_) {}
+})();
 
 // 1. 尝试从 localStorage 恢复状态
 loadState();
