@@ -153,8 +153,10 @@ const pidsBackground = {
 
 // ========== 状态持久化 ==========
 const STORAGE_KEY = 'pids-simulator-state';
+const SAVE_DEBUG = false;  // 诊断保存问题时开启，确认正常后改 false
 let saveReady = false;
 let saveTimer = null;
+let autoSaveIntervalId = null;
 
 /**
  * saveState - 将当前状态序列化到 localStorage
@@ -169,7 +171,10 @@ let saveTimer = null;
  * 依赖: saveReady, STORAGE_KEY, pidsBackground, CONFIG
  */
 function saveState() {
-    if (!saveReady) return;
+    if (!saveReady) {
+        if (SAVE_DEBUG) console.log('[PIDS] saveState 跳过：saveReady=false（初始化未完成）');
+        return;
+    }
 
     // 剥离背景图片的 data URL（体积过大，不持久化）
     const bgForSave = { ...pidsBackground };
@@ -195,6 +200,10 @@ function saveState() {
 
     try {
         localStorage.setItem(STORAGE_KEY, payload);
+        if (SAVE_DEBUG) console.log('[PIDS] ✅ 已保存 ' + stations.length + ' 个车站, ' +
+            '线路色=' + line.color + ', ' +
+            '车站索引=' + currentStationIndex + ', ' +
+            '大小=' + (payload.length / 1024).toFixed(1) + 'KB');
     } catch (e) {
         console.warn('[PIDS] localStorage 保存失败 (' + (e.name || 'Error') + '):', e.message);
 
@@ -236,8 +245,14 @@ function scheduleSave() {
 function loadState() {
     try {
         const raw = localStorage.getItem(STORAGE_KEY);
-        if (!raw) return false;
+        if (!raw) {
+            if (SAVE_DEBUG) console.log('[PIDS] loadState：localStorage 中无缓存数据，使用默认配置');
+            return false;
+        }
         const state = JSON.parse(raw);
+        if (SAVE_DEBUG) console.log('[PIDS] loadState：读取到缓存, ' +
+            (state.stations ? state.stations.length : 0) + ' 个车站, ' +
+            '大小=' + (raw.length / 1024).toFixed(1) + 'KB');
         if (state.line) {
             Object.assign(line, state.line);
             // 迁移旧版 positionY 整数值 (0~30) → 比例值 (0~1)
@@ -790,10 +805,10 @@ function renderBanner() {
   <text x="1475" y="65" fill="${txtColor}" fill-opacity="0.65" font-size="20" font-family="${FONT_FAMILY}" font-weight="bold" text-anchor="end">To：</text>
   <text x="1600" y="65" fill="${txtColor}" fill-opacity="0.65" font-size="15" font-family="${FONT_FAMILY}" font-weight="bold" text-anchor="middle">${destSecName}</text>
   <text x="570" y="42" fill="#000" font-size="24" font-family="${FONT_FAMILY}" font-weight="bold">${cnLabel}</text>
-  <text x="960" y="42" fill="#e94560" font-size="26" font-family="${FONT_FAMILY}" font-weight="bold" text-anchor="middle">${nameCN}</text>
+  <text x="960" y="42" fill="#e94560" font-size="32" font-family="${FONT_FAMILY}" font-weight="bold" text-anchor="middle">${nameCN}</text>
   <text x="1350" y="42" fill="#000" font-size="24" font-family="${FONT_FAMILY}" font-weight="bold" text-anchor="end">${timeCN}</text>
   <text x="570" y="72" fill="#000" fill-opacity="0.85" font-size="15" font-family="${FONT_FAMILY}">${enLabel}</text>
-  <text x="960" y="72" fill="#e94560" fill-opacity="0.85" font-size="17" font-family="${FONT_FAMILY}" font-weight="bold" text-anchor="middle">${nameEN}</text>
+  <text x="960" y="72" fill="#e94560" fill-opacity="0.85" font-size="20" font-family="${FONT_FAMILY}" font-weight="bold" text-anchor="middle">${nameEN}</text>
   <text x="1350" y="72" fill="#000" fill-opacity="0.85" font-size="15" font-family="${FONT_FAMILY}" text-anchor="end">${timeEN}</text>
 </svg>`;
 
@@ -2637,6 +2652,17 @@ updatePlaybackButtons();
 
 // 3. 启用保存（防止初始化期间的渲染触发保存）
 saveReady = true;
+if (SAVE_DEBUG) console.log('[PIDS] saveReady=true，保存机制已启用');
+
+// 3.1 全局保存安全网：页面关闭/刷新前强制保存（跳过防抖，直接写入）
+window.addEventListener('beforeunload', () => {
+    saveState();
+});
+
+// 3.2 定期自动保存：每 10 秒兜底一次（防止事件遗漏导致数据丢失）
+autoSaveIntervalId = setInterval(() => {
+    if (saveReady) saveState();
+}, 10000);
 
 // 4. 渲染
 renderPIDSDisplay();
