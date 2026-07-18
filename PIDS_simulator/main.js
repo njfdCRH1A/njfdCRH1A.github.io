@@ -30,10 +30,11 @@ const CONFIG = {
     defaultArrowScaleW: 1.0,
     defaultArrowScaleH: 1.0,
     defaultArrowColor: '#ffffff',
-    defaultArrowBlinkSpeed: 300
+    defaultArrowBlinkSpeed: 300,
+    defaultArrowStrokeWidth: 4
 };
 
-const VIEWBOX_HEIGHT = 73;  // 1920:470 = 300*470/1920 ≈ 73
+const VIEWBOX_HEIGHT = 69.5;  // 1920:445 = 300*445/1920 ≈ 69.5 (banner=95)
 
 /**
  * getLineY - 将线路位置比例 (0~1) 换算为 viewBox Y 坐标
@@ -63,7 +64,8 @@ const line = {
     arrowScaleW: CONFIG.defaultArrowScaleW,
     arrowScaleH: CONFIG.defaultArrowScaleH,
     arrowColor: CONFIG.defaultArrowColor,
-    arrowBlinkSpeed: CONFIG.defaultArrowBlinkSpeed
+    arrowBlinkSpeed: CONFIG.defaultArrowBlinkSpeed,
+    arrowStrokeWidth: CONFIG.defaultArrowStrokeWidth
 };
 
 // ========== 车站状态 ==========
@@ -73,6 +75,7 @@ let dragStationId = null;  // 当前拖拽中的车站 ID
 
 // ========== 画面切换状态 ==========
 let currentStationIndex = -1;  // -1 = 无高亮，0+ = 高亮车站索引
+let isDeparted = false;         // 是否已从当前站发车（区间运行中）
 let isAutoRunning = false;
 let autoRunIntervalId = null;
 const AUTO_RUN_DELAY = 3000;   // 自动运行间隔（毫秒）
@@ -83,6 +86,9 @@ let transferToggleTimer = null;      // 3 秒间隔定时器
 let arrowFrame = 0;                  // 箭头动画帧 (0, 1, 2)
 let arrowAnimTimer = null;           // 300ms 箭头动画定时器
 const ARROW_ANIM_DELAY = 300;        // 箭头动画帧切换间隔（毫秒）
+let currentStationBlink = true;      // 当前站黄色闪烁状态（on/off）
+let currentStationBlinkTimer = null; // 当前站闪烁定时器
+const CURRENT_STATION_BLINK_DELAY = 500; // 当前站闪烁间隔（毫秒）
 
 // ========== 时间状态 ==========
 const DAY_NAMES = ['日', '一', '二', '三', '四', '五', '六'];
@@ -147,8 +153,10 @@ const pidsBackground = {
 
 // ========== 状态持久化 ==========
 const STORAGE_KEY = 'pids-simulator-state';
+const SAVE_DEBUG = false;  // 诊断保存问题时开启，确认正常后改 false
 let saveReady = false;
 let saveTimer = null;
+let autoSaveIntervalId = null;
 
 /**
  * saveState - 将当前状态序列化到 localStorage
@@ -163,7 +171,10 @@ let saveTimer = null;
  * 依赖: saveReady, STORAGE_KEY, pidsBackground, CONFIG
  */
 function saveState() {
-    if (!saveReady) return;
+    if (!saveReady) {
+        if (SAVE_DEBUG) console.log('[PIDS] saveState 跳过：saveReady=false（初始化未完成）');
+        return;
+    }
 
     // 剥离背景图片的 data URL（体积过大，不持久化）
     const bgForSave = { ...pidsBackground };
@@ -175,12 +186,24 @@ function saveState() {
         stationCounter,
         timeState: { ...timeState },
         pidsBackground: bgForSave,
-        currentStationIndex
+        currentStationIndex,
+        isDeparted
     };
 
-    const payload = JSON.stringify(state);
+    let payload;
+    try {
+        payload = JSON.stringify(state);
+    } catch (e) {
+        console.warn('[PIDS] 序列化状态失败 (' + (e.name || 'Error') + '):', e.message);
+        return;
+    }
+
     try {
         localStorage.setItem(STORAGE_KEY, payload);
+        if (SAVE_DEBUG) console.log('[PIDS] ✅ 已保存 ' + stations.length + ' 个车站, ' +
+            '线路色=' + line.color + ', ' +
+            '车站索引=' + currentStationIndex + ', ' +
+            '大小=' + (payload.length / 1024).toFixed(1) + 'KB');
     } catch (e) {
         console.warn('[PIDS] localStorage 保存失败 (' + (e.name || 'Error') + '):', e.message);
 
@@ -222,8 +245,14 @@ function scheduleSave() {
 function loadState() {
     try {
         const raw = localStorage.getItem(STORAGE_KEY);
-        if (!raw) return false;
+        if (!raw) {
+            if (SAVE_DEBUG) console.log('[PIDS] loadState：localStorage 中无缓存数据，使用默认配置');
+            return false;
+        }
         const state = JSON.parse(raw);
+        if (SAVE_DEBUG) console.log('[PIDS] loadState：读取到缓存, ' +
+            (state.stations ? state.stations.length : 0) + ' 个车站, ' +
+            '大小=' + (raw.length / 1024).toFixed(1) + 'KB');
         if (state.line) {
             Object.assign(line, state.line);
             // 迁移旧版 positionY 整数值 (0~30) → 比例值 (0~1)
@@ -258,11 +287,167 @@ function loadState() {
             }
         }
         if (state.currentStationIndex !== undefined) currentStationIndex = state.currentStationIndex;
+        if (state.isDeparted !== undefined) isDeparted = state.isDeparted;
         return true;
     } catch (e) {
         console.warn('[PIDS] localStorage 读取失败，将使用默认配置:', e.message);
         return false;
     }
+}
+
+/**
+ * exportConfig - 导出当前配置为 JSON 文件
+ *
+ * 收集线路、车站、背景等全部配置（不包括背景图片的 data URL），
+ * 导出为带时间戳的 JSON 文件供用户保存分享。
+ *
+ * 依赖: line, stations, stationCounter, timeState, pidsBackground (全局)
+ */
+function exportConfig() {
+    const bgForExport = { ...pidsBackground };
+    delete bgForExport.image;
+
+    const exportData = {
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        line: { ...line },
+        stations: stations.slice(),
+        stationCounter,
+        timeState: { ...timeState },
+        pidsBackground: bgForExport
+    };
+
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const ts = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+    const filename = `PIDS_${ts}.json`;
+
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+/**
+ * importConfig - 从 JSON 文件导入配置
+ *
+ * 读取用户选择的 JSON 文件，解析并应用配置。
+ * 导入前不备份当前状态，如需撤销请先手动导出。
+ *
+ * 依赖: importConfigInput (DOM), line, stations, stationCounter, timeState, pidsBackground (全局)
+ */
+function importConfig(file) {
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        try {
+            const data = JSON.parse(e.target.result);
+            if (!data.line || !data.stations) {
+                alert('无效的配置文件：缺少 line 或 stations 数据。');
+                return;
+            }
+
+            // 应用线路配置
+            Object.assign(line, data.line);
+
+            // 应用车站
+            stations = data.stations.slice();
+            stationCounter = data.stationCounter || stations.length;
+
+            // 应用时间状态
+            if (data.timeState) {
+                Object.assign(timeState, data.timeState);
+                syncTimeInputsToState();
+            }
+
+            // 应用背景（不含图片 data URL）
+            if (data.pidsBackground) {
+                Object.assign(pidsBackground, data.pidsBackground);
+                pidsBackground.image = null;
+                if (pidsBackground.type === 'image') {
+                    pidsBackground.type = 'color';
+                }
+            }
+
+            // 重置画面状态
+            currentStationIndex = -1;
+            isDeparted = false;
+            transferToggle = false;
+            currentStationBlink = true;
+
+            // 先持久化数据，防止后续 UI 同步出错导致状态丢失
+            scheduleSave();
+
+            // 刷新 UI
+            pauseAutoRun();
+
+            // 同步线路控件
+            colorInput.value = line.color;
+            colorPreview.style.backgroundColor = line.color;
+            bannerTextColorSelect.value = line.bannerTextColor;
+            stationNameColorInput.value = line.stationNameColor;
+            stationNameColorPreview.style.backgroundColor = line.stationNameColor;
+            lengthInput.value = line.length;
+            lengthValue.textContent = line.length;
+            strokeInput.value = line.strokeWidth;
+            strokeValue.textContent = line.strokeWidth;
+            positionInput.value = line.positionY;
+            positionValue.textContent = line.positionY.toFixed(2);
+            iconSizeInput.value = line.iconSize;
+            iconSizeValue.textContent = line.iconSize;
+            nameModeSelect.value = line.nameDisplayMode;
+            nameFontSizeInput.value = line.nameFontSize;
+            nameFontSizeValue.textContent = line.nameFontSize;
+            trainFormationInput.value = line.trainFormation;
+            stopPositionSelect.value = line.stopPosition;
+            directionSelect.value = line.direction;
+            arrowScaleWInput.value = line.arrowScaleW;
+            arrowScaleWValue.textContent = line.arrowScaleW.toFixed(1);
+            arrowScaleHInput.value = line.arrowScaleH;
+            arrowScaleHValue.textContent = line.arrowScaleH.toFixed(1);
+            arrowColorInput.value = line.arrowColor;
+            arrowColorPreview.style.backgroundColor = line.arrowColor;
+            arrowBlinkInput.value = line.arrowBlinkSpeed;
+            arrowBlinkValue.textContent = line.arrowBlinkSpeed;
+            arrowStrokeWidthInput.value = line.arrowStrokeWidth;
+            arrowStrokeWidthValue.textContent = line.arrowStrokeWidth;
+
+            // 同步背景控件
+            pidsBgType.value = pidsBackground.type;
+            pidsBgColorInput.value = pidsBackground.color;
+            pidsBgColorPreview.style.backgroundColor = pidsBackground.color;
+            if (pidsBackground.type === 'image') {
+                pidsBgColorGroup.classList.add('pids-bg-hidden');
+                pidsBgImageGroup.classList.remove('pids-bg-hidden');
+                pidsBgSizeRow.style.display = 'block';
+                pidsBgImageSize.value = pidsBackground.imageSize;
+            } else {
+                pidsBgColorGroup.classList.remove('pids-bg-hidden');
+                pidsBgImageGroup.classList.add('pids-bg-hidden');
+                pidsBgSizeRow.style.display = 'none';
+            }
+            pidsBgOpacityInput.value = Math.round(pidsBackground.imageOpacity * 100);
+            pidsBgOpacityValue.textContent = Math.round(pidsBackground.imageOpacity * 100);
+
+            useSystemTimeCheck.checked = timeState.useSystemTime;
+            setTimeInputsState();
+
+            rebuildStationList();
+            updatePlaybackButtons();
+            renderBanner();
+            renderPIDSDisplay();
+            applyPidsBackground();
+
+        } catch (err) {
+            console.error('[PIDS] 导入失败:', err);
+            alert('配置文件解析失败：' + err.message);
+        }
+    };
+    reader.readAsText(file);
 }
 
 // ========== DOM 引用 ==========
@@ -300,12 +485,17 @@ const arrowColorInput = document.getElementById('arrowColorInput');
 const arrowColorPreview = document.getElementById('arrowColorPreview');
 const arrowBlinkInput = document.getElementById('arrowBlinkInput');
 const arrowBlinkValue = document.getElementById('arrowBlinkValue');
+const arrowStrokeWidthInput = document.getElementById('arrowStrokeWidthInput');
+const arrowStrokeWidthValue = document.getElementById('arrowStrokeWidthValue');
 const pidsLineTrack = document.getElementById('pidsLineTrack');
 const pidsBanner = document.getElementById('pidsBanner');
 const addStationBtn = document.getElementById('addStationBtn');
 const resetStationBtn = document.getElementById('resetStationBtn');
 const reverseStationBtn = document.getElementById('reverseStationBtn');
 const resetLineBtn = document.getElementById('resetLineBtn');
+const exportConfigBtn = document.getElementById('exportConfigBtn');
+const importConfigBtn = document.getElementById('importConfigBtn');
+const importConfigInput = document.getElementById('importConfigInput');
 const stationList = document.getElementById('stationList');
 const pidsSection = document.querySelector('.pids-section');
 const pidsWrapper = document.querySelector('.pids-display-wrapper');
@@ -322,8 +512,8 @@ const pidsBgImageSize = document.getElementById('pidsBgImageSize');
 const pidsBgClearImage = document.getElementById('pidsBgClearImage');
 const pidsBgOpacityInput = document.getElementById('pidsBgOpacityInput');
 const pidsBgOpacityValue = document.getElementById('pidsBgOpacityValue');
+const btnGoToStart = document.getElementById('btnGoToStart');
 const btnPrevStep = document.getElementById('btnPrevStep');
-const btnPause = document.getElementById('btnPause');
 const btnAutoRun = document.getElementById('btnAutoRun');
 const btnNextStep = document.getElementById('btnNextStep');
 
@@ -561,33 +751,65 @@ function buildStationNameSvg(station, cx, cy, index, isPassed) {
 // ========== PIDS 横幅 ==========
 
 /**
- * renderBanner - 生成 PIDS 顶部横幅 SVG（参考 banner.svg 设计）
+ * renderBanner - 生成 PIDS 顶部横幅 SVG
  *
- * 横幅包含线路色背景和白色装饰条带，显示运行方向和当前站信息。
- * 原 banner.svg 中黑色填充部分（rect）同步为线路颜色。
+ * 横幅包含线路色背景和白色装饰条带，白色区域内显示当前站/下一站信息。
+ * 停站中显示「本站」，区间运行中显示「下一站」。
+ * 标签与时间用黑色，站名用红色。
  *
- * 依赖: line (全局), stations (全局), FONT_FAMILY (全局)
+ * 依赖: line (全局), stations (全局), FONT_FAMILY (全局),
+ *       currentStationIndex, isDeparted (全局)
  */
 function renderBanner() {
     if (!pidsBanner) return;
 
-    // 终点站名用于显示方向
-    const destCnName = stations.length > 0
-        ? stations[stations.length - 1].name
-        : '还没有车站呢……';
-    const destSecName = stations.length > 0
-        ? (stations[stations.length - 1].secondaryName || '')
-        : 'Hmm... There are no stations.';
-
     const txtColor = line.bannerTextColor;
     const displayTime = getDisplayTime();
     const timeStr = formatTimeHM(displayTime);
-    const bannerSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 70" preserveAspectRatio="none">
-  <rect width="1920" height="70" fill="${line.color}"/>
-  <path fill="#fff" d="M1352.7,65.9h-785.5c-8.3,0-15-6.7-15-15V0h815.5v50.9c0,8.3-6.7,15-15,15Z"/>
-  <text x="1900" y="44" fill="${txtColor}" font-size="38" font-family="${FONT_FAMILY}" font-weight="bold" text-anchor="end">${timeStr}</text>
-  <text x="1380" y="33" fill="${txtColor}" font-size="28" font-family="${FONT_FAMILY}" font-weight="bold" text-anchor="start">开往：${destCnName}</text>
-  <text x="1380" y="55" fill="${txtColor}" fill-opacity="0.85" font-size="14" font-family="${FONT_FAMILY}" text-anchor="start">To：${destSecName}</text>
+
+    // 终点站（目的地）
+    const destCnName = stations.length > 0
+        ? stations[stations.length - 1].name
+        : '';
+    const destSecName = stations.length > 0
+        ? (stations[stations.length - 1].secondaryName || '')
+        : '';
+
+    // 站信息
+    let cnLabel = '', enLabel = '', nameCN = '', nameEN = '';
+    let timeCN = '', timeEN = '';
+
+    if (stations.length > 0 && currentStationIndex >= 0) {
+        const nextIdx = (currentStationIndex + 1) % stations.length;
+        const currentStation = stations[currentStationIndex];
+        const nextStation = stations[nextIdx];
+        const timeToNext = currentStation.timeToNext;
+
+        cnLabel = isDeparted ? '下一站：' : '本站：';
+        enLabel = isDeparted ? 'Next station：' : 'This station：';
+        const displayStation = isDeparted ? nextStation : currentStation;
+        nameCN = displayStation.name;
+        nameEN = displayStation.secondaryName || displayStation.name;
+        // 终点站停站时不显示到达时间（没有下一站）
+        const isTerminal = (!isDeparted && currentStationIndex === stations.length - 1);
+        timeCN = isTerminal ? '' : `下一站预计 ${timeToNext} 分钟`;
+        timeEN = isTerminal ? '' : `arrive in ${timeToNext} min`;
+    }
+
+    const bannerSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 95" preserveAspectRatio="none">
+  <rect width="1920" height="95" fill="${line.color}"/>
+  <path fill="#fff" d="M1352.7,90h-785.5c-8.3,0-15-6.7-15-15V0h815.5v75c0,8.3-6.7,15-15,15Z"/>
+  <text x="1890" y="60" fill="${txtColor}" font-size="44" font-family="${FONT_FAMILY}" font-weight="bold" text-anchor="end">${timeStr}</text>
+  <text x="1480" y="45" fill="${txtColor}" fill-opacity="0.85" font-size="30" font-family="${FONT_FAMILY}" font-weight="bold" text-anchor="end">开往：</text>
+  <text x="1600" y="45" fill="${txtColor}" fill-opacity="0.85" font-size="30" font-family="${FONT_FAMILY}" font-weight="bold" text-anchor="middle">${destCnName}</text>
+  <text x="1475" y="65" fill="${txtColor}" fill-opacity="0.65" font-size="20" font-family="${FONT_FAMILY}" font-weight="bold" text-anchor="end">To：</text>
+  <text x="1600" y="65" fill="${txtColor}" fill-opacity="0.65" font-size="15" font-family="${FONT_FAMILY}" font-weight="bold" text-anchor="middle">${destSecName}</text>
+  <text x="570" y="42" fill="#000" font-size="24" font-family="${FONT_FAMILY}" font-weight="bold">${cnLabel}</text>
+  <text x="960" y="42" fill="#e94560" font-size="32" font-family="${FONT_FAMILY}" font-weight="bold" text-anchor="middle">${nameCN}</text>
+  <text x="1350" y="42" fill="#000" font-size="24" font-family="${FONT_FAMILY}" font-weight="bold" text-anchor="end">${timeCN}</text>
+  <text x="570" y="72" fill="#000" fill-opacity="0.85" font-size="15" font-family="${FONT_FAMILY}">${enLabel}</text>
+  <text x="960" y="72" fill="#e94560" fill-opacity="0.85" font-size="20" font-family="${FONT_FAMILY}" font-weight="bold" text-anchor="middle">${nameEN}</text>
+  <text x="1350" y="72" fill="#000" fill-opacity="0.85" font-size="15" font-family="${FONT_FAMILY}" text-anchor="end">${timeEN}</text>
 </svg>`;
 
     pidsBanner.innerHTML = bannerSvg;
@@ -1003,7 +1225,7 @@ function buildArrowSvg(cx, cy, w, h, direction, frame, isPassed) {
     let svg = `<g transform="translate(${x}, ${y}) scale(${sx}, ${sy})">`;
     for (let pi = 0; pi < 3; pi++) {
         const strokeAttr = visible.has(pi)
-            ? `stroke="${arrowStroke}" stroke-width="4" stroke-miterlimit="10"`
+            ? `stroke="${arrowStroke}" stroke-width="${line.arrowStrokeWidth}" stroke-miterlimit="10"`
             : '';
         svg += `\n  <polyline fill="none" ${strokeAttr} points="${paths[pi]}"/>`;
     }
@@ -1022,6 +1244,8 @@ function buildArrowSvg(cx, cy, w, h, direction, frame, isPassed) {
  */
 function isStationPassed(logicalIndex) {
     if (currentStationIndex < 0) return false;
+    // 离站状态：当前站也已过（列车在区间运行中）
+    if (isDeparted && logicalIndex === currentStationIndex) return true;
     // 列车始终从 0 站出发向 N-1 行进，已过站 = 索引小于当前站
     return logicalIndex < currentStationIndex;
 }
@@ -1144,7 +1368,11 @@ function renderPIDSDisplay() {
 
             // 站点圆圈样式
             const stationStroke = isPassed ? '#999' : line.color;
-            const stationFill = isPassed ? '#f0f0f0' : (isCurrent ? line.color : '#fff');
+            const stationFill = isPassed
+                ? '#f0f0f0'
+                : (isCurrent
+                    ? (currentStationBlink ? '#FFD700' : '#fff')
+                    : '#fff');
             const stationGlow = (isCurrent && !isPassed)
                 ? ` filter="url(#glow)"`
                 : '';
@@ -1166,8 +1394,8 @@ function renderPIDSDisplay() {
                 stationsSvg += `
   <rect x="${x}" y="${y}" width="${renderSize}" height="${renderSize}" rx="${renderSize / 2}" ry="${renderSize / 2}" fill="${stationFill}" stroke="${stationStroke}" stroke-width="${strokeW}"${stationGlow} />`;
 
-                // 到站时间（仅未过站且非换乘态显示）
-                if (showTime) {
+                // 到站时间（仅未过站且非换乘态且非当前站显示，当前站时间为0无意义）
+                if (showTime && !isCurrent) {
                     const timeFontSize = Math.max(1.2, iconSize * 0.5);
                     const timeFill = isCurrent ? '#fff' : '#000';
                     stationsSvg += `
@@ -1217,9 +1445,11 @@ function renderPIDSDisplay() {
                     ? stations.length - 1 - leftVisualIdx
                     : leftVisualIdx;
                 const segPassed = isStationPassed(leftLogicalIdx);
+                // 站间运行时当前活跃区间的箭头保持活跃色，不灰化
+                const actualPassed = (isDeparted && isActive) ? false : segPassed;
 
                 const frame = isActive ? arrowFrame : 2;
-                stationsSvg += '\n  ' + buildArrowSvg(arrowCx, lineCenterY, arrowW, arrowH, line.direction, frame, segPassed);
+                stationsSvg += '\n  ' + buildArrowSvg(arrowCx, lineCenterY, arrowW, arrowH, line.direction, frame, actualPassed);
             }
         }
     }
@@ -1306,6 +1536,7 @@ function createStationItem(station) {
     nameInput.addEventListener('change', (e) => {
         station.name = e.target.value;
         renderPIDSDisplay();
+        scheduleSave();
     });
 
     // secondary 名变更
@@ -1313,6 +1544,7 @@ function createStationItem(station) {
     secNameInput.addEventListener('change', (e) => {
         station.secondaryName = e.target.value;
         renderPIDSDisplay();
+        scheduleSave();
     });
 
     // 到下一站时间变更
@@ -1320,6 +1552,7 @@ function createStationItem(station) {
     timeInput.addEventListener('change', (e) => {
         station.timeToNext = parseInt(e.target.value, 10) || 0;
         renderPIDSDisplay();
+        scheduleSave();
     });
 
     // 站点类型显示（自动判定：有换乘线路 → 换乘站）
@@ -1402,6 +1635,7 @@ function createStationItem(station) {
         dragStationId = null;
         rebuildStationList();
         renderPIDSDisplay();
+        scheduleSave();
     });
 
     // 删除
@@ -1649,6 +1883,8 @@ function addStation() {
     stations.push(station);
     const item = createStationItem(station);
     stationList.appendChild(item);
+    updatePlaybackButtons();
+    scheduleSave();
     renderPIDSDisplay();
 }
 
@@ -1661,6 +1897,7 @@ function deleteStation(stationId) {
         currentStationIndex = stations.length - 1;
     }
     updatePlaybackButtons();
+    scheduleSave();
     rebuildStationList();
     renderPIDSDisplay();
 }
@@ -1678,6 +1915,7 @@ function resetStations() {
     currentStationIndex = -1;
     stationList.innerHTML = '';
     updatePlaybackButtons();
+    scheduleSave();
     renderPIDSDisplay();
 }
 
@@ -1693,6 +1931,8 @@ function reverseStations() {
     if (currentStationIndex >= 0) {
         currentStationIndex = stations.length - 1 - currentStationIndex;
     }
+    updatePlaybackButtons();
+    scheduleSave();
     rebuildStationList();
     renderPIDSDisplay();
 }
@@ -1730,6 +1970,7 @@ function resetLine() {
     line.arrowScaleH = CONFIG.defaultArrowScaleH;
     line.arrowColor = CONFIG.defaultArrowColor;
     line.arrowBlinkSpeed = CONFIG.defaultArrowBlinkSpeed;
+    line.arrowStrokeWidth = CONFIG.defaultArrowStrokeWidth;
 
     // 重置车站
     stations = [];
@@ -1753,6 +1994,8 @@ function resetLine() {
 
     // 重置换乘切换
     transferToggle = false;
+    currentStationBlink = true;
+    isDeparted = false;
 
     // 同步所有 UI 控件
     colorInput.value = line.color;
@@ -1782,6 +2025,8 @@ function resetLine() {
     arrowColorPreview.style.backgroundColor = line.arrowColor;
     arrowBlinkInput.value = line.arrowBlinkSpeed;
     arrowBlinkValue.textContent = line.arrowBlinkSpeed;
+    arrowStrokeWidthInput.value = line.arrowStrokeWidth;
+    arrowStrokeWidthValue.textContent = line.arrowStrokeWidth;
     restartArrowAnimation();
 
     // PIDS 背景控件
@@ -1817,54 +2062,97 @@ function resetLine() {
 // ========== 画面切换控制 ==========
 
 /**
+ * goToStart - 回到起点站
+ *
+ * 将列车重置到第一个车站且处于停站状态。
+ */
+function goToStart() {
+    if (stations.length === 0) return;
+    isDeparted = false;
+    transferToggle = false;
+    currentStationIndex = 0;
+    currentStationBlink = true;
+    scheduleSave();
+    renderPIDSDisplay();
+}
+
+/**
  * updatePlaybackButtons - 同步按钮视觉状态
  *
- * 自动运行中：AutoRun 按钮高亮，Pause 按钮常规；
- * 暂停中：AutoRun 常规，Pause 按钮高亮。
+ * 自动运行中：按钮高亮显示「⏸ 暂停」；
+ * 暂停中：按钮常规显示「▶ 自动运行」。
  */
 function updatePlaybackButtons() {
     if (isAutoRunning) {
         btnAutoRun.classList.add('btn-playback-active');
-        btnPause.classList.remove('btn-playback-pause');
-        btnPause.classList.add('btn-playback-active');
-        btnPause.textContent = '⏸ 暂停';
+        btnAutoRun.textContent = '⏸ 暂停';
     } else {
         btnAutoRun.classList.remove('btn-playback-active');
-        btnPause.classList.remove('btn-playback-active');
-        btnPause.classList.add('btn-playback-pause');
-        btnPause.textContent = '⏸ 已暂停';
+        btnAutoRun.textContent = '▶ 自动运行';
     }
     // 没有车站时禁用步进按钮
     const hasStations = stations.length > 0;
     btnPrevStep.disabled = !hasStations;
     btnNextStep.disabled = !hasStations;
     btnAutoRun.disabled = !hasStations;
-    btnPause.disabled = !hasStations;
+    btnGoToStart.disabled = !hasStations;
 }
 
 /**
- * goNextStep - 跳转到下一个车站
+ * goNextStep - 推进一个运行阶段
  *
- * 高亮索引循环推进（到头后回到 0）。
+ * 运行周期：停站 → 离站(区间运行) → 下一站停站 → 离站 → …
+ * - 停站中（isDeparted=false）：发车 → isDeparted=true
+ * - 区间中（isDeparted=true）：到达下一站 → isDeparted=false, currentStationIndex+1
+ *
  * 如果没有车站则不做任何操作。
  */
 function goNextStep() {
     if (stations.length === 0) return;
     transferToggle = false;  // 手动步进时恢复普通样式
-    currentStationIndex = (currentStationIndex + 1) % stations.length;
+    if (isDeparted) {
+        // 区间运行中 → 到达下一站
+        isDeparted = false;
+        currentStationIndex = (currentStationIndex + 1) % stations.length;
+    } else if (currentStationIndex === stations.length - 1) {
+        // 终点站停站中 → 直接跳回起点站
+        isDeparted = false;
+        currentStationIndex = 0;
+        currentStationBlink = true;
+    } else {
+        // 停站中 → 发车进入区间
+        isDeparted = true;
+    }
+    scheduleSave();
     renderPIDSDisplay();
 }
 
 /**
- * goPrevStep - 跳转到上一个车站
+ * goPrevStep - 回退一个运行阶段
  *
- * 高亮索引循环回退（到 0 后回到末尾）。
+ * goNextStep 的逆操作：
+ * - 区间中（isDeparted=true）：退回上一站停站 → isDeparted=false
+ * - 停站中（isDeparted=false）：退回上一段区间 → isDeparted=true, currentStationIndex-1
+ *
  * 如果没有车站则不做任何操作。
  */
 function goPrevStep() {
     if (stations.length === 0) return;
     transferToggle = false;  // 手动步进时恢复普通样式
-    currentStationIndex = (currentStationIndex - 1 + stations.length) % stations.length;
+    if (isDeparted) {
+        // 区间运行中 → 退回停站
+        isDeparted = false;
+    } else if (currentStationIndex === 0) {
+        // 起点站停站中 → 直接跳回终点站
+        isDeparted = false;
+        currentStationIndex = stations.length - 1;
+        currentStationBlink = true;
+    } else {
+        // 停站中 → 退回上一段区间
+        isDeparted = true;
+        currentStationIndex = (currentStationIndex - 1 + stations.length) % stations.length;
+    }
+    scheduleSave();
     renderPIDSDisplay();
 }
 
@@ -1920,7 +2208,11 @@ function startTransferToggle() {
 function startArrowAnimation() {
     if (arrowAnimTimer) return;
     arrowAnimTimer = setInterval(() => {
-        arrowFrame = (arrowFrame + 1) % 3;
+        if (isDeparted) {
+            arrowFrame = (arrowFrame + 1) % 3;
+        } else {
+            arrowFrame = 2;  // 停站时箭头固定不闪烁
+        }
         if (stations.length > 1) {
             renderPIDSDisplay();
         }
@@ -1938,11 +2230,31 @@ function restartArrowAnimation() {
         arrowAnimTimer = null;
     }
     arrowAnimTimer = setInterval(() => {
-        arrowFrame = (arrowFrame + 1) % 3;
+        if (isDeparted) {
+            arrowFrame = (arrowFrame + 1) % 3;
+        } else {
+            arrowFrame = 2;
+        }
         if (stations.length > 1) {
             renderPIDSDisplay();
         }
     }, line.arrowBlinkSpeed);
+}
+
+/**
+ * startCurrentStationBlink - 启动当前站黄色闪烁定时器
+ *
+ * 每 500ms 翻转 currentStationBlink，驱动当前站圆圈在黄色与白色之间切换。
+ * 仅在存在当前高亮站时触发渲染。
+ */
+function startCurrentStationBlink() {
+    if (currentStationBlinkTimer) return;
+    currentStationBlinkTimer = setInterval(() => {
+        currentStationBlink = !currentStationBlink;
+        if (currentStationIndex >= 0 && stations.length > 0) {
+            renderPIDSDisplay();
+        }
+    }, CURRENT_STATION_BLINK_DELAY);
 }
 
 function pauseAutoRun() {
@@ -2002,6 +2314,7 @@ function moveStation(stationId, direction) {
         currentStationIndex = idx;
     }
 
+    scheduleSave();
     rebuildStationList();
     renderPIDSDisplay();
 }
@@ -2012,6 +2325,7 @@ colorInput.addEventListener('input', (e) => {
     line.color = e.target.value;
     colorPreview.style.backgroundColor = line.color;
     renderPIDSDisplay();
+    scheduleSave();
 });
 
 bannerTextColorSelect.addEventListener('change', (e) => {
@@ -2024,6 +2338,7 @@ stationNameColorInput.addEventListener('input', (e) => {
     line.stationNameColor = e.target.value;
     stationNameColorPreview.style.backgroundColor = line.stationNameColor;
     renderPIDSDisplay();
+    scheduleSave();
 });
 
 // ========== PIDS 背景事件 ==========
@@ -2042,12 +2357,14 @@ pidsBgType.addEventListener('change', () => {
         pidsBgImageGroup.classList.remove('pids-bg-hidden');
     }
     applyPidsBackground();
+    scheduleSave();
 });
 
 pidsBgColorInput.addEventListener('input', () => {
     pidsBackground.color = pidsBgColorInput.value;
     pidsBgColorPreview.style.backgroundColor = pidsBackground.color;
     applyPidsBackground();
+    scheduleSave();
 });
 
 pidsBgImageInput.addEventListener('change', () => {
@@ -2059,6 +2376,7 @@ pidsBgImageInput.addEventListener('change', () => {
         pidsBackground.image = e.target.result;
         pidsBgSizeRow.style.display = 'block';
         applyPidsBackground();
+        scheduleSave();
     };
     reader.readAsDataURL(file);
 });
@@ -2066,6 +2384,7 @@ pidsBgImageInput.addEventListener('change', () => {
 pidsBgImageSize.addEventListener('change', () => {
     pidsBackground.imageSize = pidsBgImageSize.value;
     applyPidsBackground();
+    scheduleSave();
 });
 
 pidsBgClearImage.addEventListener('click', () => {
@@ -2073,12 +2392,14 @@ pidsBgClearImage.addEventListener('click', () => {
     pidsBgImageInput.value = '';
     pidsBgSizeRow.style.display = 'none';
     applyPidsBackground();
+    scheduleSave();
 });
 
 pidsBgOpacityInput.addEventListener('input', () => {
     pidsBackground.imageOpacity = parseInt(pidsBgOpacityInput.value, 10) / 100;
     pidsBgOpacityValue.textContent = pidsBgOpacityInput.value;
     applyPidsBackground();
+    scheduleSave();
 });
 
 // ========== 时间控制事件 ==========
@@ -2128,35 +2449,41 @@ lengthInput.addEventListener('input', (e) => {
     line.length = parseInt(e.target.value, 10);
     lengthValue.textContent = line.length;
     renderPIDSDisplay();
+    scheduleSave();
 });
 
 strokeInput.addEventListener('input', (e) => {
     line.strokeWidth = parseInt(e.target.value, 10);
     strokeValue.textContent = line.strokeWidth;
     renderPIDSDisplay();
+    scheduleSave();
 });
 
 positionInput.addEventListener('input', (e) => {
     line.positionY = parseFloat(e.target.value);
     positionValue.textContent = line.positionY.toFixed(2);
     renderPIDSDisplay();
+    scheduleSave();
 });
 
 iconSizeInput.addEventListener('input', (e) => {
     line.iconSize = parseInt(e.target.value, 10);
     iconSizeValue.textContent = line.iconSize;
     renderPIDSDisplay();
+    scheduleSave();
 });
 
 nameModeSelect.addEventListener('change', (e) => {
     line.nameDisplayMode = e.target.value;
     renderPIDSDisplay();
+    scheduleSave();
 });
 
 nameFontSizeInput.addEventListener('input', (e) => {
     line.nameFontSize = parseInt(e.target.value, 10);
     nameFontSizeValue.textContent = line.nameFontSize;
     renderPIDSDisplay();
+    scheduleSave();
 });
 
 trainFormationInput.addEventListener('change', () => {
@@ -2203,15 +2530,31 @@ arrowBlinkInput.addEventListener('input', () => {
     scheduleSave();
 });
 
+arrowStrokeWidthInput.addEventListener('input', () => {
+    line.arrowStrokeWidth = parseInt(arrowStrokeWidthInput.value, 10);
+    arrowStrokeWidthValue.textContent = line.arrowStrokeWidth;
+    renderPIDSDisplay();
+    scheduleSave();
+});
+
 addStationBtn.addEventListener('click', addStation);
 resetStationBtn.addEventListener('click', resetStations);
 reverseStationBtn.addEventListener('click', reverseStations);
 resetLineBtn.addEventListener('click', resetLine);
 
+exportConfigBtn.addEventListener('click', exportConfig);
+importConfigBtn.addEventListener('click', () => importConfigInput.click());
+importConfigInput.addEventListener('change', (e) => {
+    if (e.target.files && e.target.files[0]) {
+        importConfig(e.target.files[0]);
+        e.target.value = '';
+    }
+});
+
+btnGoToStart.addEventListener('click', goToStart);
 btnPrevStep.addEventListener('click', goPrevStep);
 btnNextStep.addEventListener('click', goNextStep);
-btnAutoRun.addEventListener('click', startAutoRun);
-btnPause.addEventListener('click', pauseAutoRun);
+btnAutoRun.addEventListener('click', toggleAutoRun);
 
 // ========== 初始化 ==========
 
@@ -2239,6 +2582,9 @@ startTransferToggle();
 
 // 1.6 启动站间箭头动画定时器
 startArrowAnimation();
+
+// 1.7 启动当前站黄色闪烁定时器
+startCurrentStationBlink();
 
 // 2. 同步所有 UI 控件到当前状态（默认值或恢复值）
 colorInput.value = line.color;
@@ -2268,6 +2614,8 @@ arrowColorInput.value = line.arrowColor;
 arrowColorPreview.style.backgroundColor = line.arrowColor;
 arrowBlinkInput.value = line.arrowBlinkSpeed;
 arrowBlinkValue.textContent = line.arrowBlinkSpeed;
+arrowStrokeWidthInput.value = line.arrowStrokeWidth;
+arrowStrokeWidthValue.textContent = line.arrowStrokeWidth;
 
 // PIDS 背景控件
 pidsBgType.value = pidsBackground.type;
@@ -2304,6 +2652,17 @@ updatePlaybackButtons();
 
 // 3. 启用保存（防止初始化期间的渲染触发保存）
 saveReady = true;
+if (SAVE_DEBUG) console.log('[PIDS] saveReady=true，保存机制已启用');
+
+// 3.1 全局保存安全网：页面关闭/刷新前强制保存（跳过防抖，直接写入）
+window.addEventListener('beforeunload', () => {
+    saveState();
+});
+
+// 3.2 定期自动保存：每 10 秒兜底一次（防止事件遗漏导致数据丢失）
+autoSaveIntervalId = setInterval(() => {
+    if (saveReady) saveState();
+}, 10000);
 
 // 4. 渲染
 renderPIDSDisplay();
@@ -2327,6 +2686,9 @@ window.PIDS = {
     timeState,
     pidsBackground,
     transferToggle,
+    currentStationBlink,
+    isDeparted,
+    startCurrentStationBlink,
     renderPIDSDisplay,
     getLineY,
     renderBanner,

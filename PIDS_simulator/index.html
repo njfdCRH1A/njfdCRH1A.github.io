@@ -172,6 +172,12 @@
                     <input type="number" id="arrowBlinkInput" class="arrow-blink-input" min="100" max="2000" step="50" value="300">
                 </div>
 
+                <!-- 箭头描边粗细 -->
+                <div class="control-group">
+                    <label>箭头描边粗细 <span class="value-label" id="arrowStrokeWidthValue">4</span></label>
+                    <input type="range" id="arrowStrokeWidthInput" class="slider" min="1" max="12" value="4">
+                </div>
+
                 <!-- 站名显示模式 -->
                 <div class="control-group">
                     <label>站名显示模式</label>
@@ -187,6 +193,13 @@
                 <div class="control-group">
                     <label>站名字号 <span class="value-label" id="nameFontSizeValue">4</span></label>
                     <input type="range" id="nameFontSizeInput" class="slider" min="2" max="8" value="4">
+                </div>
+
+                <!-- 导出 / 导入 -->
+                <div class="control-group">
+                    <button id="exportConfigBtn" class="btn-reset-station" style="width:100%;">📤 导出配置</button>
+                    <button id="importConfigBtn" class="btn-reset-station" style="width:100%;margin-top:6px;">📥 导入配置</button>
+                    <input type="file" id="importConfigInput" accept=".json" style="display:none;">
                 </div>
 
                 <!-- 重置线路 -->
@@ -217,10 +230,10 @@
 
             <!-- 画面切换控制栏 -->
             <div class="pids-playback-bar" id="pidsPlaybackBar">
-                <button id="btnPrevStep" class="btn-playback" title="上一步">⏮ 上一步</button>
-                <button id="btnPause" class="btn-playback btn-playback-pause" title="暂停">⏸ 暂停</button>
-                <button id="btnAutoRun" class="btn-playback btn-playback-active" title="自动运行">▶ 自动运行</button>
-                <button id="btnNextStep" class="btn-playback" title="下一步">下一步 ⏭</button>
+                <button id="btnGoToStart" class="btn-playback" title="回到起点站">⏮ 起点</button>
+                <button id="btnPrevStep" class="btn-playback" title="上一步">|< 上一步</button>
+                <button id="btnAutoRun" class="btn-playback" title="自动运行">▶ 自动运行</button>
+                <button id="btnNextStep" class="btn-playback" title="下一步">下一步 >|</button>
             </div>
 
             <!-- 下部：车站编辑区 -->

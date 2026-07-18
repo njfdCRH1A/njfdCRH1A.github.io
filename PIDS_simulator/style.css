@@ -326,7 +326,7 @@ body {
 }
 
 .pids-banner {
-    flex: 0 0 calc(100% * 70 / 540);
+    flex: 0 0 calc(100% * 95 / 540);
     width: 100%;
 }
 
